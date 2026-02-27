@@ -1,0 +1,528 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Multi-Model Prompt Explorer</title>
+    <style>
+        :root {
+            --bg-color: #ffffff;
+            --panel-bg: #f5f5f5;
+            --text-color: #333333;
+            --border-color: #dddddd;
+            --accent-color: #007bff;
+        }
+
+        body {
+            margin: 0;
+            padding: 0;
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, Helvetica, Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--text-color);
+            height: 100vh;
+            display: flex;
+            flex-direction: column;
+        }
+
+        header {
+            padding: 1rem;
+            background-color: #ffffff;
+            border-bottom: 1px solid var(--border-color);
+            display: flex;
+            gap: 1rem;
+            align-items: center;
+        }
+
+        input[type="text"], input[type="password"], select {
+            padding: 0.5rem;
+            border-radius: 4px;
+            border: 1px solid var(--border-color);
+            background: #ffffff;
+            color: #333333;
+        }
+
+        input[type="text"] { flex-grow: 1; }
+        input[type="password"] { width: 200px; }
+
+        button {
+            padding: 0.5rem 1rem;
+            background-color: var(--accent-color);
+            border: none;
+            border-radius: 4px;
+            color: white;
+            cursor: pointer;
+            font-weight: bold;
+        }
+
+        button:disabled { background-color: #ccc; cursor: not-allowed; }
+
+        .container {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            grid-template-rows: 1fr 1fr;
+            gap: 1px;
+            flex-grow: 1;
+            background-color: var(--border-color);
+            overflow: hidden;
+        }
+
+        .panel {
+            background-color: #ffffff;
+            display: flex;
+            flex-direction: column;
+            overflow: hidden;
+            padding: 0.5rem;
+        }
+
+        .panel-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 0.5rem;
+            padding-bottom: 0.2rem;
+            border-bottom: 1px solid var(--border-color);
+        }
+
+        .model-selector { font-size: 0.75rem; width: 100%; }
+
+        .content-area {
+            display: grid;
+            grid-template-columns: 150px 1fr;
+            gap: 0.5rem;
+            flex-grow: 1;
+            overflow: hidden;
+        }
+
+        .file-browser {
+            font-size: 0.75rem;
+            border-right: 1px solid var(--border-color);
+            padding-right: 0.5rem;
+            overflow-y: auto;
+            color: #555;
+        }
+
+        .file-item {
+            cursor: pointer;
+            padding: 2px 4px;
+            border-radius: 2px;
+        }
+
+        .file-item:hover { background: #f0f0f0; }
+        .file-item.active { background: var(--accent-color); color: white; }
+
+        .response-viewer {
+            overflow: auto;
+            background: #f8f9fa;
+            padding: 0.5rem;
+            font-family: 'Courier New', Courier, monospace;
+            font-size: 0.85rem;
+            white-space: pre-wrap;
+            position: relative;
+            flex-grow: 1;
+            display: block;
+            border: 1px solid #eee;
+            color: #222;
+        }
+
+        .preview-viewer {
+            flex-grow: 1;
+            background: white;
+            border: 1px solid #eee;
+            display: none;
+        }
+
+        .panel-footer {
+            display: flex;
+            gap: 0.5rem;
+            padding-top: 0.5rem;
+            border-top: 1px solid var(--border-color);
+        }
+
+        .view-btn {
+            font-size: 0.7rem;
+            padding: 2px 6px;
+            background: #e0e0e0;
+            color: #333;
+        }
+
+        .view-btn.active {
+            background: var(--accent-color);
+            color: white;
+        }
+
+        .loading::after {
+            content: "Thinking...";
+            position: absolute;
+            top: 50%;
+            left: 50%;
+            transform: translate(-50%, -50%);
+            color: #999;
+        }
+
+        .error { color: #dc3545; }
+    </style>
+</head>
+<body>
+
+<header>
+    <div style="display: flex; flex-direction: column; gap: 0.2rem;">
+        <input type="password" id="apiKey" placeholder="OpenRouter API Key">
+        <label style="font-size: 0.7rem; display: flex; align-items: center; gap: 0.3rem; cursor: pointer;">
+            <input type="checkbox" id="secureStore"> Hardware Encrypt (TouchID/FaceID)
+        </label>
+    </div>
+    <input type="text" id="promptInput" placeholder="Enter your prompt here...">
+    <button id="runBtn">Run All</button>
+</header>
+
+<div class="container" id="panelContainer">
+    <!-- Panels will be generated here -->
+</div>
+
+<script>
+    const API_URL = "https://openrouter.ai/api/v1";
+    let freeModels = [];
+    const panelFiles = { 1: {}, 2: {}, 3: {}, 4: {} };
+
+    // --- Hardware Encryption (WebAuthn PRF) ---
+    async function getHardwareKey(isRegistering = false) {
+        const id = new TextEncoder().encode("openrouter-explorer");
+        const options = {
+            publicKey: {
+                challenge: crypto.getRandomValues(new Uint8Array(32)),
+                rp: { name: "OpenRouter Explorer" },
+                user: { id: id, name: "user", displayName: "User" },
+                pubKeyCredParams: [{ alg: -7, type: "public-key" }],
+                authenticatorSelection: { userVerification: "required" },
+                extensions: { prf: { eval: { first: new Uint8Array(32).fill(1) } } }
+            }
+        };
+
+        const cred = isRegistering 
+            ? await navigator.credentials.create(options)
+            : await navigator.credentials.get(options);
+        
+        const output = cred.getClientExtensionResults().prf.results.first;
+        return await crypto.subtle.importKey("raw", output, { name: "AES-GCM" }, false, ["encrypt", "decrypt"]);
+    }
+
+    async function encryptKey(plainKey) {
+        const hwKey = await getHardwareKey(true);
+        const iv = crypto.getRandomValues(new Uint8Array(12));
+        const encoded = new TextEncoder().encode(plainKey);
+        const ciphertext = await crypto.subtle.encrypt({ name: "AES-GCM", iv }, hwKey, encoded);
+        
+        localStorage.setItem('enc-api-key', btoa(String.fromCharCode(...new Uint8Array(ciphertext))));
+        localStorage.setItem('enc-iv', btoa(String.fromCharCode(...iv)));
+    }
+
+    async function decryptKey() {
+        const encKey = localStorage.getItem('enc-api-key');
+        const ivBase64 = localStorage.getItem('enc-iv');
+        if (!encKey || !ivBase64) return null;
+
+        const hwKey = await getHardwareKey(false);
+        const ciphertext = Uint8Array.from(atob(encKey), c => c.charCodeAt(0));
+        const iv = Uint8Array.from(atob(ivBase64), c => c.charCodeAt(0));
+
+        const decrypted = await crypto.subtle.decrypt({ name: "AES-GCM", iv }, hwKey, ciphertext);
+        return new TextDecoder().decode(decrypted);
+    }
+    // ------------------------------------------
+
+    const panelContainer = document.getElementById('panelContainer');
+    const runBtn = document.getElementById('runBtn');
+    const promptInput = document.getElementById('promptInput');
+    const apiKeyInput = document.getElementById('apiKey');
+    const secureStore = document.getElementById('secureStore');
+
+    // Auto-load API key if encrypted
+    if (localStorage.getItem('enc-api-key')) {
+        apiKeyInput.placeholder = "Encrypted key stored. Click Run to unlock.";
+        secureStore.checked = true;
+    }
+
+    // Create 4 panels
+    for (let i = 1; i <= 4; i++) {
+        const panel = document.createElement('div');
+        panel.className = 'panel';
+        panel.innerHTML = `
+            <div class="panel-header">
+                <select class="model-selector" id="model-${i}">
+                    <option value="">Loading models...</option>
+                </select>
+            </div>
+            <div class="content-area">
+                <div class="file-browser" id="browser-${i}">
+                    <div>📁 project</div>
+                    <div class="file-item active" onclick="showFile(${i}, 'index.html')">&nbsp;&nbsp;📄 index.html</div>
+                </div>
+                <div style="display: flex; flex-direction: column; overflow: hidden; flex-grow: 1;">
+                    <div class="response-viewer" id="res-${i}">Ready...</div>
+                    <iframe class="preview-viewer" id="preview-${i}"></iframe>
+                    <div class="panel-footer">
+                        <button class="view-btn active" id="btn-res-${i}" onclick="setView(${i}, 'res')">Response</button>
+                        <button class="view-btn" id="btn-prev-${i}" onclick="setView(${i}, 'prev')">HTML Preview</button>
+                    </div>
+                </div>
+            </div>
+        `;
+        panelContainer.appendChild(panel);
+        panelFiles[i]['index.html'] = document.documentElement.outerHTML;
+    }
+
+    async function fetchModels() {
+        try {
+            const response = await fetch(`${API_URL}/models`);
+            const data = await response.json();
+            freeModels = data.data.filter(m => 
+                m.pricing && m.pricing.prompt === "0" && m.pricing.completion === "0"
+            ).sort((a, b) => a.name.localeCompare(b.name));
+
+            updateDropdowns();
+        } catch (error) {
+            console.error("Failed to fetch models", error);
+        }
+    }
+
+    function updateDropdowns() {
+        const selects = document.querySelectorAll('.model-selector');
+        selects.forEach((select, idx) => {
+            const panelIdx = idx + 1;
+            select.innerHTML = freeModels.map(m => 
+                `<option value="${m.id}">${m.name}</option>`
+            ).join('');
+            
+            const savedModel = localStorage.getItem(`saved-model-${panelIdx}`);
+            if (savedModel && freeModels.some(m => m.id === savedModel)) {
+                select.value = savedModel;
+            } else if (freeModels[idx]) {
+                select.value = freeModels[idx].id;
+            }
+
+            select.onchange = (e) => {
+                localStorage.setItem(`saved-model-${panelIdx}`, e.target.value);
+            };
+        });
+    }
+
+    function extractFiles(panelIdx, content) {
+        const regex = /```(?:[\w\-\/]+)?(?:\s*[:\s]\s*([\w\.\-\/]+))?\n([\s\S]*?)```/gi;
+        let match;
+        let foundAny = false;
+
+        while ((match = regex.exec(content)) !== null) {
+            let filename = match[1] || "";
+            const code = match[2].trim();
+            
+            if (!filename) {
+                const opening = content.substring(match.index, match.index + 20);
+                const langMatch = opening.match(/```(\w+)/);
+                const lang = langMatch ? langMatch[1].toLowerCase() : "";
+                
+                if (lang === 'html' || code.includes('<html') || code.includes('<!DOCTYPE')) {
+                    filename = `index-${Object.keys(panelFiles[panelIdx]).length}.html`;
+                } else if (lang === 'css' || (code.includes('{') && code.includes(':') && !code.includes('<'))) {
+                    filename = `style-${Object.keys(panelFiles[panelIdx]).length}.css`;
+                } else if (lang === 'js' || lang === 'javascript' || code.includes('function') || code.includes('const ')) {
+                    filename = `script-${Object.keys(panelFiles[panelIdx]).length}.js`;
+                } else {
+                    filename = `file-${Object.keys(panelFiles[panelIdx]).length}.txt`;
+                }
+            }
+
+            panelFiles[panelIdx][filename] = code;
+            foundAny = true;
+        }
+
+        if (foundAny) updateFileBrowser(panelIdx);
+    }
+
+    function updateFileBrowser(panelIdx) {
+        const browser = document.getElementById(`browser-${panelIdx}`);
+        const currentRes = document.getElementById(`res-${panelIdx}`).textContent;
+        const files = Object.keys(panelFiles[panelIdx]);
+        
+        let html = '<div style="font-weight: bold; margin-bottom: 4px;">📁 project</div>';
+        files.sort((a, b) => {
+            if (a === 'index.html') return -1;
+            if (b === 'index.html') return 1;
+            return a.localeCompare(b);
+        }).forEach(filename => {
+            const isActive = currentRes === panelFiles[panelIdx][filename];
+            html += `<div class="file-item ${isActive ? 'active' : ''}" onclick="showFile(${panelIdx}, '${filename}')">&nbsp;&nbsp;📄 ${filename}</div>`;
+        });
+        browser.innerHTML = html;
+    }
+
+    async function callOpenRouter(panelIdx, model, prompt, apiKey) {
+        let finalKey = apiKey;
+        
+        // If key field is empty but we have an encrypted store, try to decrypt
+        if (!finalKey && localStorage.getItem('enc-api-key')) {
+            try {
+                finalKey = await decryptKey();
+            } catch (e) {
+                alert("Hardware authentication failed.");
+                return;
+            }
+        }
+
+        if (secureStore.checked && finalKey && !localStorage.getItem('enc-api-key')) {
+            try {
+                await encryptKey(finalKey);
+                apiKeyInput.value = "";
+                apiKeyInput.placeholder = "Encrypted key stored.";
+            } catch (e) {
+                console.error("Encryption failed", e);
+            }
+        }
+
+        const resElement = document.getElementById(`res-${panelIdx}`);
+        const prevElement = document.getElementById(`preview-${panelIdx}`);
+        
+        let seconds = 0;
+        resElement.textContent = `[Requesting ${model}... 0s]`;
+        resElement.classList.add('loading');
+        resElement.classList.remove('error');
+        prevElement.srcdoc = "";
+        setView(panelIdx, 'res');
+
+        const timerInterval = setInterval(() => {
+            seconds++;
+            resElement.textContent = `[Requesting ${model}... ${seconds}s]`;
+        }, 1000);
+
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 30000);
+
+        try {
+            const response = await fetch(`${API_URL}/chat/completions`, {
+                method: "POST",
+                signal: controller.signal,
+                headers: {
+                    "Authorization": `Bearer ${apiKey}`,
+                    "Content-Type": "application/json",
+                    "HTTP-Referer": window.location.href,
+                },
+                body: JSON.stringify({
+                    model: model,
+                    messages: [{ role: "user", content: prompt }]
+                })
+            });
+
+            clearInterval(timerInterval);
+            clearTimeout(timeoutId);
+            const data = await response.json();
+            resElement.classList.remove('loading');
+
+            if (data.choices && data.choices[0]) {
+                const content = data.choices[0].message.content;
+                resElement.textContent = content;
+                extractFiles(panelIdx, content);
+            } else {
+                resElement.textContent = "Error: " + JSON.stringify(data.error || data);
+                resElement.classList.add('error');
+            }
+        } catch (error) {
+            clearInterval(timerInterval);
+            clearTimeout(timeoutId);
+            resElement.classList.remove('loading');
+            if (error.name === 'AbortError') {
+                resElement.textContent = `Error: Request timed out after 30 seconds.`;
+            } else {
+                resElement.textContent = "Fetch Error: " + error.message;
+            }
+            resElement.classList.add('error');
+        }
+    }
+
+    function showFile(panelIdx, filename) {
+        const content = panelFiles[panelIdx][filename];
+        const resElement = document.getElementById(`res-${panelIdx}`);
+        const previewElement = document.getElementById(`preview-${panelIdx}`);
+        
+        resElement.textContent = content;
+        
+        // If it looks like HTML, update preview
+        if (filename.endsWith('.html') || content.trim().startsWith('<')) {
+            previewElement.srcdoc = content;
+        }
+
+        // Highlight active file
+        updateFileBrowser(panelIdx);
+    }
+
+    function setView(panelIdx, view) {
+        const res = document.getElementById(`res-${panelIdx}`);
+        const prev = document.getElementById(`preview-${panelIdx}`);
+        const btnRes = document.getElementById(`btn-res-${panelIdx}`);
+        const btnPrev = document.getElementById(`btn-prev-${panelIdx}`);
+
+        if (view === 'res') {
+            res.style.display = 'block';
+            prev.style.display = 'none';
+            btnRes.classList.add('active');
+            btnPrev.classList.remove('active');
+        } else {
+            res.style.display = 'none';
+            prev.style.display = 'block';
+            btnRes.classList.remove('active');
+            btnPrev.classList.add('active');
+            
+            // Try to find the best HTML to preview
+            const content = res.textContent;
+            
+            // 1. Look for explicit HTML blocks
+            const htmlMatch = content.match(/```(?:html)?\s*([\s\S]*?)```/i);
+            let htmlContent = htmlMatch ? htmlMatch[1] : "";
+
+            // 2. If no block, but starts with tag, use whole content
+            if (!htmlContent && content.trim().startsWith('<')) {
+                htmlContent = content;
+            }
+
+            // 3. Fallback: Search all files in this panel for an .html file
+            if (!htmlContent) {
+                const files = panelFiles[panelIdx];
+                const htmlFile = Object.keys(files).find(f => f.endsWith('.html') && f !== 'index.html');
+                if (htmlFile) htmlContent = files[htmlFile];
+            }
+            
+            if (htmlContent) {
+                prev.srcdoc = htmlContent;
+            } else {
+                prev.srcdoc = "<html><body style='background: #1e1e1e; color: #888; font-family: sans-serif; display: flex; align-items: center; justify-content: center; height: 100vh; margin: 0;'><div>No HTML content found to preview.</div></body></html>";
+            }
+        }
+    }
+
+    runBtn.addEventListener('click', async () => {
+        const prompt = promptInput.value;
+        const apiKey = apiKeyInput.value;
+        if (!apiKey || !prompt) return;
+
+        runBtn.disabled = true;
+        for (let i = 1; i <= 4; i++) {
+            const model = document.getElementById(`model-${i}`).value;
+            if (model) {
+                // Execute call without awaiting it to allow some overlap if desired, 
+                // but we await it here to respect the user's request for sequential delays.
+                await callOpenRouter(i, model, prompt, apiKey);
+                await new Promise(resolve => setTimeout(resolve, 500));
+            }
+        }
+        runBtn.disabled = false;
+    });
+
+    promptInput.addEventListener('keydown', (e) => {
+        if (e.key === 'Enter' && !runBtn.disabled) {
+            runBtn.click();
+        }
+    });
+
+    fetchModels();
+</script>
+
+</body>
+</html>
